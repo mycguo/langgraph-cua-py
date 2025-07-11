@@ -23,14 +23,11 @@ def take_action_or_end(state: CUAState):
         return END
 
     last_message = state.get("messages", [])[-1]
-    additional_kwargs = getattr(last_message, "additional_kwargs", None)
+    
+    # For Claude/Anthropic, tool calls are in the tool_calls attribute
+    tool_calls = getattr(last_message, 'tool_calls', [])
 
-    if not additional_kwargs:
-        return END
-
-    tool_outputs = additional_kwargs.get("tool_outputs")
-
-    if not is_computer_tool_call(tool_outputs):
+    if not is_computer_tool_call(tool_calls):
         return END
 
     if not state.get("instance_id"):
@@ -90,10 +87,7 @@ def create_cua(
             This can be provided in the configuration, or set as an environment variable (SCRAPYBARA_API_KEY).
         timeout_hours: The number of hours to keep the virtual machine running before it times out.
             Must be between 0.01 and 24. Default is 1.
-        zdr_enabled: Whether or not Zero Data Retention is enabled in the user's OpenAI account. If True,
-            the agent will not pass the 'previous_response_id' to the model, and will always pass it the full
-            message history for each request. If False, the agent will pass the 'previous_response_id' to the
-            model, and only the latest message in the history will be passed. Default False.
+        zdr_enabled: This parameter is maintained for backward compatibility but is not used with Claude/Anthropic models.
         recursion_limit: The maximum number of recursive calls the agent can make. Default is 100.
         auth_state_id: The ID of the authentication state. If defined, it will be used to authenticate
             with Scrapybara. Only applies if 'environment' is set to 'web'.

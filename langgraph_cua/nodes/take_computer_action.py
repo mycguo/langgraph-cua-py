@@ -4,7 +4,6 @@ from typing import Any, Dict, Optional
 from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_stream_writer
-from openai.types.responses.response_computer_tool_call import ResponseComputerToolCall
 from scrapybara.types import ComputerResponse, InstanceGetStreamUrlResponse
 
 from ..types import CUAState, get_configuration_with_defaults
@@ -49,14 +48,22 @@ def take_computer_action(state: CUAState, config: RunnableConfig) -> Dict[str, A
     """
     message: AnyMessage = state.get("messages", [])[-1]
     assert message.type == "ai", "Last message must be an AI message"
-    tool_outputs = message.additional_kwargs.get("tool_outputs")
-
-    if not is_computer_tool_call(tool_outputs):
-        # This should never happen, but include the check for proper type safety.
+    
+    # For Claude/Anthropic, tool calls are in the tool_calls attribute
+    tool_calls = getattr(message, 'tool_calls', [])
+    
+    if not tool_calls:
         raise ValueError("Cannot take computer action without a computer call in the last message.")
-
-    # Cast tool_outputs as list[ResponseComputerToolCall] since is_computer_tool_call is true
-    tool_outputs: list[ResponseComputerToolCall] = tool_outputs
+    
+    # Find the computer tool call
+    computer_tool_call = None
+    for tool_call in tool_calls:
+        if tool_call.get('name') == 'computer':
+            computer_tool_call = tool_call
+            break
+    
+    if not computer_tool_call:
+        raise ValueError("No computer tool call found in the last message.")
 
     instance_id = state.get("instance_id")
     if not instance_id:
@@ -89,55 +96,76 @@ def take_computer_action(state: CUAState, config: RunnableConfig) -> Dict[str, A
         writer = get_stream_writer()
         writer({"stream_url": stream_url})
 
-    output = tool_outputs[-1]
-    action = output.get("action")
+    # Extract action from Claude tool call format
+    action = computer_tool_call.get('args', {})
+    tool_call_id = computer_tool_call.get('id')
     tool_message: Optional[ToolMessage] = None
 
     try:
         computer_response: Optional[ComputerResponse] = None
-        action_type = action.get("type")
+        action_type = action.get("action")
 
-        if action_type == "click":
+        if action_type == "left_click":
             computer_response = instance.computer(
                 action="click_mouse",
-                button="middle" if action.get("button") == "wheel" else action.get("button"),
-                coordinates=[action.get("x"), action.get("y")],
+                button="left",
+                coordinates=[action.get("coordinate")[0], action.get("coordinate")[1]],
+            )
+        elif action_type == "right_click":
+            computer_response = instance.computer(
+                action="click_mouse",
+                button="right",
+                coordinates=[action.get("coordinate")[0], action.get("coordinate")[1]],
+            )
+        elif action_type == "middle_click":
+            computer_response = instance.computer(
+                action="click_mouse",
+                button="middle",
+                coordinates=[action.get("coordinate")[0], action.get("coordinate")[1]],
             )
         elif action_type == "double_click":
             computer_response = instance.computer(
                 action="click_mouse",
                 button="left",
-                coordinates=[action.get("x"), action.get("y")],
+                coordinates=[action.get("coordinate")[0], action.get("coordinate")[1]],
                 num_clicks=2,
             )
-        elif action_type == "drag":
+        elif action_type == "left_click_drag":
             computer_response = instance.computer(
                 action="drag_mouse",
-                path=[[point.get("x"), point.get("y")] for point in action.get("path")],
+                path=[[action.get("startCoordinate")[0], action.get("startCoordinate")[1]], 
+                      [action.get("endCoordinate")[0], action.get("endCoordinate")[1]]],
             )
-        elif action_type == "keypress":
-            mapped_keys = [
-                CUA_KEY_TO_SCRAPYBARA_KEY.get(key.lower(), key.lower())
-                for key in action.get("keys")
-            ]
-            computer_response = instance.computer(action="press_key", keys=mapped_keys)
-        elif action_type == "move":
+        elif action_type == "key":
+            # Handle both "key" and "text" fields for key actions
+            key_value = action.get("key") or action.get("text")
+            if key_value:
+                mapped_keys = [
+                    CUA_KEY_TO_SCRAPYBARA_KEY.get(key_value.lower(), key_value.lower())
+                ]
+                computer_response = instance.computer(action="press_key", keys=mapped_keys)
+            else:
+                raise ValueError("Key action missing key or text parameter")
+        elif action_type == "mouse_move":
             computer_response = instance.computer(
-                action="move_mouse", coordinates=[action.get("x"), action.get("y")]
+                action="move_mouse", coordinates=[action.get("coordinate")[0], action.get("coordinate")[1]]
             )
         elif action_type == "screenshot":
             computer_response = instance.computer(action="take_screenshot")
         elif action_type == "wait":
-            # Sleep for 2000ms (2 seconds)
-            time.sleep(2)
+            # Sleep for the specified duration (in seconds)
+            duration = action.get("duration", 2)
+            time.sleep(duration)
             # Take a screenshot after waiting
             computer_response = instance.computer(action="take_screenshot")
         elif action_type == "scroll":
             computer_response = instance.computer(
                 action="scroll",
-                delta_x=action.get("scroll_x") // 20,
-                delta_y=action.get("scroll_y") // 20,
-                coordinates=[action.get("x"), action.get("y")],
+                delta_x=action.get("coordinate")[0] if action.get("direction") == "left" else (
+                    -action.get("coordinate")[0] if action.get("direction") == "right" else 0),
+                delta_y=action.get("coordinate")[1] if action.get("direction") == "down" else (
+                    -action.get("coordinate")[1] if action.get("direction") == "up" else 0),
+                coordinates=[action.get("coordinate")[0], action.get("coordinate")[1]],
             )
         elif action_type == "type":
             computer_response = instance.computer(action="type_text", text=action.get("text"))
@@ -146,18 +174,21 @@ def take_computer_action(state: CUAState, config: RunnableConfig) -> Dict[str, A
 
         if computer_response:
             output_content = {
-                "type": "input_image",
-                "image_url": f"data:image/png;base64,{computer_response.base_64_image}",
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": computer_response.base_64_image,
+                },
             }
-            tool_message = {
-                "role": "tool",
-                "content": [output_content],
-                "tool_call_id": output.get("call_id"),
-                "additional_kwargs": {"type": "computer_call_output"},
-            }
+            tool_message = ToolMessage(
+                content=[output_content],
+                tool_call_id=tool_call_id,
+                additional_kwargs={"type": "computer_call_output"},
+            )
     except Exception as e:
         print(f"\n\nFailed to execute computer call: {e}\n\n")
-        print(f"Computer call details: {output}\n\n")
+        print(f"Computer call details: {computer_tool_call}\n\n")
 
     return {
         "messages": tool_message if tool_message else None,

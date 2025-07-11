@@ -7,7 +7,7 @@ from typing import List, Literal
 
 from dotenv import load_dotenv
 from langchain_core.messages import AnyMessage
-from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
@@ -55,7 +55,7 @@ def process_input(state: PriceFinderState):
             description="The node to route to, either 'computer_use_agent' for any input which might require using a computer to assist the user, or 'respond' for any other input",
         )
 
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    model = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
     model_with_tools = model.with_structured_output(RoutingToolSchema)
 
     messages = [system_message, {"role": "user", "content": state.get("messages")[-1].content}]
@@ -95,7 +95,7 @@ def respond(state: PriceFinderState):
         + format_messages(state.get("messages")),
     }
 
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    model = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
 
     response = model.invoke([system_message, human_message])
     return {"response": response}

@@ -45,17 +45,17 @@ def get_instance(
     return client.get(id)
 
 
-def is_computer_tool_call(tool_outputs: Any) -> bool:
+def is_computer_tool_call(tool_calls: Any) -> bool:
     """
-    Checks if the given tool outputs are a computer call.
+    Checks if the given tool calls contain a computer call.
 
     Args:
-        tool_outputs: The tool outputs to check.
+        tool_calls: The tool calls to check.
 
     Returns:
-        True if the tool outputs are a computer call, false otherwise.
+        True if the tool calls contain a computer call, false otherwise.
     """
-    if not tool_outputs or not isinstance(tool_outputs, list):
+    if not tool_calls or not isinstance(tool_calls, list):
         return False
 
-    return any(output.get("type") == "computer_call" for output in tool_outputs)
+    return any(call.get("name") == "computer" for call in tool_calls)

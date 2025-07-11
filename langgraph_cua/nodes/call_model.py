@@ -1,31 +1,10 @@
 from typing import Any, Dict, Optional, Union
 
-from langchain_core.messages import AIMessageChunk, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, SystemMessage
 from langchain_core.runnables.config import RunnableConfig
-from langchain_openai import ChatOpenAI
+from anthropic import Anthropic
 
 from ..types import CUAState, get_configuration_with_defaults
-
-
-def get_openai_env_from_state_env(env: str) -> str:
-    """
-    Converts one of "web", "ubuntu", or "windows" to OpenAI environment string.
-
-    Args:
-        env: The environment to convert.
-
-    Returns:
-        The corresponding OpenAI environment string.
-
-    Raises:
-        ValueError: If the environment is invalid.
-    """
-    if env == "web":
-        return "browser"
-    elif env == "ubuntu":
-        return "ubuntu"
-    elif env == "windows":
-        return "windows"
 
 
 # Scrapybara does not allow for configuring this. Must use a hardcoded value.
@@ -52,52 +31,96 @@ async def call_model(state: CUAState, config: RunnableConfig) -> Dict[str, Any]:
         The updated state with the model's response.
     """
     configuration = get_configuration_with_defaults(config)
-    environment = configuration.get("environment")
-    zdr_enabled = configuration.get("zdr_enabled")
     prompt = _prompt_to_sys_message(configuration.get("prompt"))
     messages = state.get("messages", [])
-    previous_response_id: Optional[str] = None
-    last_message = messages[-1] if messages else None
+    
+    # Convert LangChain messages to Anthropic format
+    anthropic_messages = []
+    for msg in messages:
+        if hasattr(msg, 'type') and msg.type == 'human':
+            anthropic_messages.append({"role": "user", "content": msg.content})
+        elif hasattr(msg, 'type') and msg.type == 'ai':
+            # Handle AI messages with tool calls
+            content = []
+            if msg.content:
+                content.append({"type": "text", "text": msg.content})
+            
+            # Add tool_use blocks if present
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tool_call in msg.tool_calls:
+                    content.append({
+                        "type": "tool_use",
+                        "id": tool_call["id"],
+                        "name": tool_call["name"],
+                        "input": tool_call["args"]
+                    })
+            
+            anthropic_messages.append({
+                "role": "assistant",
+                "content": content
+            })
+        elif hasattr(msg, 'type') and msg.type == 'tool':
+            # Handle tool messages
+            tool_content = []
+            if hasattr(msg, 'content') and msg.content:
+                if isinstance(msg.content, list):
+                    tool_content = msg.content
+                else:
+                    tool_content = [{"type": "text", "text": str(msg.content)}]
+            
+            anthropic_messages.append({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": msg.tool_call_id, "content": tool_content}]
+            })
 
-    # Check if the last message is a tool message
-    if last_message and getattr(last_message, "type", None) == "tool" and zdr_enabled is False:
-        # If it's a tool message, check if the second-to-last message is an AI message
-        if (
-            len(messages) >= 2
-            and getattr(messages[-2], "type", None) == "ai"
-            and hasattr(messages[-2], "response_metadata")
-        ):
-            previous_response_id = messages[-2].response_metadata["id"]
-
-    llm = ChatOpenAI(
-        model="computer-use-preview",
-        model_kwargs={"truncation": "auto", "previous_response_id": previous_response_id},
-    )
-
-    tool = {
-        "type": "computer_use_preview",
-        "display_width": DEFAULT_DISPLAY_WIDTH,
-        "display_height": DEFAULT_DISPLAY_HEIGHT,
-        "environment": get_openai_env_from_state_env(environment),
-    }
-    llm_with_tools = llm.bind_tools([tool])
-
-    response: AIMessageChunk
-
-    # Check if the last message is a tool message
-    if last_message and getattr(last_message, "type", None) == "tool" and zdr_enabled is False:
-        if previous_response_id is None:
-            raise ValueError("Cannot process tool message without a previous_response_id")
-
-        # Only pass the tool message to the model
-        response = await llm_with_tools.ainvoke([last_message])
+    client = Anthropic()
+    
+    tools = [{
+        "type": "computer_20250124",
+        "name": "computer",
+        "display_width_px": DEFAULT_DISPLAY_WIDTH,
+        "display_height_px": DEFAULT_DISPLAY_HEIGHT,
+    }]
+    
+    if prompt and prompt.get("content"):
+        system_prompt = [{"type": "text", "text": prompt.get("content")}]
     else:
-        # Pass all messages to the model
-        if prompt is None:
-            response = await llm_with_tools.ainvoke(messages)
-        else:
-            response = await llm_with_tools.ainvoke([prompt, *messages])
-
-    return {
-        "messages": response,
-    }
+        system_prompt = None
+    
+    try:
+        response = client.beta.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            temperature=0,
+            messages=anthropic_messages,
+            tools=tools,
+            betas=["computer-use-2025-01-24"]
+        )
+        
+        # Convert response back to LangChain format
+        content = []
+        tool_calls = []
+        
+        for block in response.content:
+            if block.type == "text":
+                content.append(block.text)
+            elif block.type == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "args": block.input
+                })
+        
+        # Create AIMessage with tool calls
+        ai_message = AIMessageChunk(
+            content=" ".join(content) if content else "",
+            tool_calls=tool_calls
+        )
+        
+        return {
+            "messages": ai_message,
+        }
+        
+    except Exception as e:
+        print(f"Error calling Anthropic API: {e}")
+        raise
